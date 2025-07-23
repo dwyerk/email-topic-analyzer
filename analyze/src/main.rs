@@ -14,6 +14,8 @@ struct Args {
     analysis_only: bool,
     #[clap(short, long, help = "Mailing list address to filter out (e.g., 'pen@penhood.net'). If not specified, no mailing list filtering is applied.")]
     mailing_list_address: Option<String>,
+    #[clap(short, long, help = "Show topic analysis based on subject lines")]
+    topic_analysis: bool,
 }
 
 fn main() {
@@ -22,7 +24,9 @@ fn main() {
 
     match parse_mbox(&args.path, &args.from, &args.mailing_list_address) {
         Ok(thread_collection) => {
-            if args.analysis_only {
+            if args.topic_analysis {
+                thread_collection.print_topic_analysis();
+            } else if args.analysis_only {
                 thread_collection.print_participation_analysis();
             } else {
                 thread_collection.print_summary();
@@ -101,14 +105,14 @@ fn process_messages(mbox: mbox_reader::MboxFile, from: &Option<String>, mailing_
             .map(|refs| refs.iter().map(|s| s.to_string()).collect())
             .unwrap_or_else(Vec::new);
 
-        let msg = Message {
-            id: message.message_id().unwrap_or("").to_string(),
+        let msg = Message::new(
+            message.message_id().unwrap_or("").to_string(),
             in_reply_to,
             references,
-            sender: sender_email.to_string(),
-            subject: subject.to_string(),
+            sender_email.to_string(),
+            subject.to_string(),
             date,
-        };
+        );
 
         // Skip messages without message ID
         if msg.id.is_empty() {

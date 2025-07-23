@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -7,6 +8,8 @@ pub struct Message {
     pub references: Vec<String>,
     pub sender: String,
     pub subject: String,
+    pub normalized_subject: String,  // Subject with Re:, Fwd:, etc. removed
+    pub topic_keywords: Vec<String>, // Extracted keywords from subject
     pub date: String,
 }
 
@@ -15,6 +18,63 @@ impl Message {
         mailing_list_patterns.iter().any(|pattern| {
             self.sender.contains(pattern)
         })
+    }
+
+    pub fn new(id: String, in_reply_to: Option<String>, references: Vec<String>, 
+               sender: String, subject: String, date: String) -> Self {
+        let normalized_subject = Self::normalize_subject(&subject);
+        let topic_keywords = Self::extract_keywords(&normalized_subject);
+        
+        Message {
+            id,
+            in_reply_to,
+            references,
+            sender,
+            subject,
+            normalized_subject,
+            topic_keywords,
+            date,
+        }
+    }
+
+    fn normalize_subject(subject: &str) -> String {
+        use regex::Regex;
+        
+        // Remove common prefixes like Re:, Fwd:, etc.
+        let re = Regex::new(r"(?i)^(re:|fwd:|fw:|forward:|reply:|\[.*?\])\s*").unwrap();
+        let mut normalized = subject.to_string();
+        
+        // Keep applying the regex until no more matches (handles multiple Re: Re: etc.)
+        loop {
+            let new_normalized = re.replace(&normalized, "").to_string();
+            if new_normalized == normalized {
+                break;
+            }
+            normalized = new_normalized;
+        }
+        
+        normalized.trim().to_string()
+    }
+
+    fn extract_keywords(subject: &str) -> Vec<String> {
+        use regex::Regex;
+        
+        // Extract meaningful words (3+ characters, not common words)
+        let word_re = Regex::new(r"\b[a-zA-Z]{3,}\b").unwrap();
+        let stop_words: HashSet<&str> = [
+            "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", 
+            "her", "was", "one", "our", "out", "day", "get", "has", "him", "his", 
+            "how", "its", "may", "new", "now", "old", "see", "two", "who", "boy", 
+            "did", "man", "way", "what", "when", "where", "will", "with", "this",
+            "that", "have", "from", "they", "know", "want", "been", "good", "much",
+            "some", "time", "very", "when", "come", "here", "just", "like", "long",
+            "make", "many", "over", "such", "take", "than", "them", "well", "were"
+        ].iter().cloned().collect();
+        
+        word_re.find_iter(subject)
+            .map(|m| m.as_str().to_lowercase())
+            .filter(|word| !stop_words.contains(word.as_str()) && word.len() >= 3)
+            .collect()
     }
 }
 
@@ -104,6 +164,22 @@ pub struct ParticipationAnalysis {
     pub user_stats: Vec<UserParticipation>,
     pub thread_collaboration_matrix: HashMap<String, HashMap<String, usize>>,
     pub most_collaborative_pairs: Vec<(String, String, usize)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Topic {
+    pub name: String,
+    pub keywords: Vec<String>,
+    pub message_count: usize,
+    pub thread_count: usize,
+    pub participants: HashSet<String>,
+}
+
+#[derive(Debug)]
+pub struct TopicAnalysis {
+    pub topics: Vec<Topic>,
+    pub keyword_frequency: HashMap<String, usize>,
+    pub topic_timeline: HashMap<String, Vec<String>>, // topic -> dates
 }
 
 impl ThreadCollection {
@@ -353,6 +429,151 @@ impl ThreadCollection {
             println!("No significant collaborations found among top users.");
             println!("This suggests most messages are individual posts to the mailing list");
             println!("rather than conversations between specific users.");
+        }
+    }
+
+    pub fn analyze_topics(&self) -> TopicAnalysis {
+        let mut keyword_frequency: HashMap<String, usize> = HashMap::new();
+        let mut topic_threads: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut topic_participants: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut topic_timeline: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Analyze all messages for keywords
+        for (thread_idx, thread) in self.threads.iter().enumerate() {
+            self.collect_thread_keywords(thread, &mut keyword_frequency, &mut topic_threads, 
+                                       &mut topic_participants, &mut topic_timeline, thread_idx);
+        }
+
+        // Analyze orphaned messages
+        for msg in &self.orphaned_messages {
+            for keyword in &msg.topic_keywords {
+                *keyword_frequency.entry(keyword.clone()).or_insert(0) += 1;
+                
+                if !self.is_mailing_list_address(&msg.sender) {
+                    topic_participants.entry(keyword.clone())
+                        .or_insert_with(HashSet::new)
+                        .insert(msg.sender.clone());
+                }
+                
+                topic_timeline.entry(keyword.clone())
+                    .or_insert_with(Vec::new)
+                    .push(msg.date.clone());
+            }
+        }
+
+        // Create topic clusters based on keyword frequency
+        let mut topics = Vec::new();
+        let min_frequency = 3; // Keywords must appear at least 3 times to be a topic
+
+        for (keyword, frequency) in &keyword_frequency {
+            if *frequency >= min_frequency {
+                let thread_count = topic_threads.get(keyword)
+                    .map(|threads| threads.len())
+                    .unwrap_or(0);
+                
+                let participants = topic_participants.get(keyword)
+                    .cloned()
+                    .unwrap_or_default();
+
+                topics.push(Topic {
+                    name: keyword.clone(),
+                    keywords: vec![keyword.clone()], // Could be expanded to include related words
+                    message_count: *frequency,
+                    thread_count,
+                    participants,
+                });
+            }
+        }
+
+        // Sort topics by frequency
+        topics.sort_by(|a, b| b.message_count.cmp(&a.message_count));
+
+        TopicAnalysis {
+            topics,
+            keyword_frequency,
+            topic_timeline,
+        }
+    }
+
+    fn collect_thread_keywords(&self, thread: &MessageThread, 
+                             keyword_frequency: &mut HashMap<String, usize>,
+                             topic_threads: &mut HashMap<String, Vec<usize>>,
+                             topic_participants: &mut HashMap<String, HashSet<String>>,
+                             topic_timeline: &mut HashMap<String, Vec<String>>,
+                             thread_idx: usize) {
+        // Process current message
+        for keyword in &thread.message.topic_keywords {
+            *keyword_frequency.entry(keyword.clone()).or_insert(0) += 1;
+            
+            topic_threads.entry(keyword.clone())
+                .or_insert_with(Vec::new)
+                .push(thread_idx);
+            
+            if !self.is_mailing_list_address(&thread.message.sender) {
+                topic_participants.entry(keyword.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(thread.message.sender.clone());
+            }
+            
+            topic_timeline.entry(keyword.clone())
+                .or_insert_with(Vec::new)
+                .push(thread.message.date.clone());
+        }
+
+        // Process children recursively
+        for child in &thread.children {
+            self.collect_thread_keywords(child, keyword_frequency, topic_threads, 
+                                       topic_participants, topic_timeline, thread_idx);
+        }
+    }
+
+    pub fn print_topic_analysis(&self) {
+        let analysis = self.analyze_topics();
+        
+        println!("\n=== Topic Analysis ===");
+        println!("Discovered {} topics from subject lines", analysis.topics.len());
+        println!("\nTop 20 Topics by Frequency:");
+        println!("{:<20} {:<10} {:<10} {:<15}", "Topic", "Messages", "Threads", "Participants");
+        println!("{}", "=".repeat(60));
+        
+        for topic in analysis.topics.iter().take(20) {
+            println!("{:<20} {:<10} {:<10} {:<15}", 
+                topic.name,
+                topic.message_count,
+                topic.thread_count,
+                topic.participants.len()
+            );
+        }
+
+        // Show keyword cloud (most frequent keywords)
+        println!("\n=== Keyword Frequency (Top 30) ===");
+        let mut sorted_keywords: Vec<(&String, &usize)> = analysis.keyword_frequency.iter().collect();
+        sorted_keywords.sort_by(|a, b| b.1.cmp(a.1));
+        
+        for (i, (keyword, count)) in sorted_keywords.iter().take(30).enumerate() {
+            if i % 5 == 0 && i > 0 {
+                println!();
+            }
+            print!("{:<15}({:>3}) ", keyword, count);
+        }
+        println!("\n");
+
+        // Show some topic details
+        if !analysis.topics.is_empty() {
+            println!("=== Top 5 Topic Details ===");
+            for topic in analysis.topics.iter().take(5) {
+                println!("\n🔍 Topic: \"{}\"", topic.name);
+                println!("   {} messages across {} threads", topic.message_count, topic.thread_count);
+                println!("   {} unique participants", topic.participants.len());
+                
+                if topic.participants.len() <= 10 {
+                    println!("   Participants: {}", 
+                        topic.participants.iter().cloned().collect::<Vec<_>>().join(", "));
+                } else {
+                    let sample: Vec<String> = topic.participants.iter().take(10).cloned().collect();
+                    println!("   Participants (sample): {}...", sample.join(", "));
+                }
+            }
         }
     }
 }
