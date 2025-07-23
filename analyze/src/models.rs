@@ -98,10 +98,10 @@ impl Message {
             "did", "man", "way", "what", "when", "where", "will", "with", "this",
             "that", "have", "from", "they", "know", "want", "been", "good", "much",
             "some", "time", "very", "when", "come", "here", "just", "like", "long",
-            "make", "many", "over", "such", "take", "than", "them", "well", "were",
+            "make", "many", "over", "such", "take", "than", "them", "well", "were", "there",
             // Add email-specific stop words
             "wrote", "said", "email", "message", "sent", "reply", "forward", "original",
-            "mailto", "http", "https", "www", "com", "org", "net", "edu"
+            "mailto", "http", "https", "www", "com", "org", "net", "edu", "gmail"
         ].iter().cloned().collect();
         
         let mut word_counts: HashMap<String, usize> = HashMap::new();

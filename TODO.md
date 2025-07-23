@@ -12,7 +12,13 @@ The tool is called "email-topic-analyzer" but currently only does threading and 
         - Enhanced keyword extraction from both subjects and bodies
         - Sample content display for topic verification
         - ~2.5x increase in topic discovery vs. subject-only analysis
-    3. Topic Modeling: Use LDA or some other unsupervised learning to group emails by topic and derive a name for the topic.
+    3. ✅ Topic Modeling: Use LDA or some other unsupervised learning to group emails by topic and derive a name for the topic.
+        - Implemented SimpleLDA (Latent Dirichlet Allocation) algorithm
+        - Automatic topic discovery from email content
+        - Topic naming from top keywords  
+        - Document-topic probability distributions
+        - Coherence scoring for topic quality
+        - Configurable number of topics via --num-topics parameter
     4. Topic Clustering: Group emails by semantic similarity
     5. Topic Evolution: Track how topics change over time
     6. ✅ Keyword Extraction: Identify the most discussed terms and concepts
@@ -88,3 +94,38 @@ The tool is called "email-topic-analyzer" but currently only does threading and 
 - Better HTML content extraction and cleaning
 - Multi-language support and internationalization
 - Advanced NLP features (sentiment analysis, named entity recognition)
+
+### Unsupervised Topic Modeling (LDA) - Completed
+- **Algorithm**: Implemented SimpleLDA using Latent Dirichlet Allocation
+- **Enhanced Features**: 
+  - ✅ **Statistical Significance Filtering**: TF-IDF based word filtering
+  - ✅ **Advanced Vocabulary Selection**: Multi-factor significance scoring
+  - Automatic topic discovery from combined subject+body content
+  - Configurable number of topics (--num-topics parameter)
+  - Topic naming using top 3 keywords
+  - Document-topic probability distributions
+  - Coherence scoring for topic quality assessment
+- **Significance Filtering Methods**:
+  1. **TF-IDF Scoring**: Term Frequency × Inverse Document Frequency
+  2. **Document Frequency Analysis**: Optimal 5-50% document appearance
+  3. **Variance Analysis**: Word usage pattern consistency
+  4. **Combined Significance Score**: Weighted combination of all factors
+- **Preprocessing Pipeline**:
+  1. Text tokenization and stop word removal
+  2. Statistical word analysis (TF-IDF, variance, frequency)
+  3. Significance-based vocabulary filtering
+  4. Document vectorization
+  5. Simplified Gibbs sampling for topic inference
+  6. Topic extraction and naming
+- **Output**: Comprehensive topic analysis showing:
+  - **Vocabulary Statistics**: Top significant words with TF-IDF scores
+  - Topic names generated from significant keywords (not just frequent ones)
+  - Document distribution across topics  
+  - Top words per topic with probabilities
+  - Sample documents for each topic
+  - Coherence scores for topic quality
+- **Performance**: Works efficiently on sample datasets (1k-12k messages)
+- **CLI Usage**: 
+  - `--topic-modeling --num-topics N` (default: 10 topics, with significance filtering)
+  - `--no-significance-filter` (disable statistical filtering for comparison)
+- **Key Improvement**: Eliminates noise words (like "pen" mailing list prefix) and focuses on topically meaningful terms
