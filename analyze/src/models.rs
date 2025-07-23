@@ -9,7 +9,9 @@ pub struct Message {
     pub sender: String,
     pub subject: String,
     pub normalized_subject: String,  // Subject with Re:, Fwd:, etc. removed
-    pub topic_keywords: Vec<String>, // Extracted keywords from subject
+    pub body: String,                // Email body content
+    pub processed_body: String,      // Body with quotes removed and cleaned
+    pub topic_keywords: Vec<String>, // Extracted keywords from subject and body
     pub date: String,
 }
 
@@ -21,9 +23,10 @@ impl Message {
     }
 
     pub fn new(id: String, in_reply_to: Option<String>, references: Vec<String>, 
-               sender: String, subject: String, date: String) -> Self {
+               sender: String, subject: String, body: String, date: String) -> Self {
         let normalized_subject = Self::normalize_subject(&subject);
-        let topic_keywords = Self::extract_keywords(&normalized_subject);
+        let processed_body = Self::process_body(&body);
+        let topic_keywords = Self::extract_keywords_from_content(&normalized_subject, &processed_body);
         
         Message {
             id,
@@ -32,6 +35,8 @@ impl Message {
             sender,
             subject,
             normalized_subject,
+            body,
+            processed_body,
             topic_keywords,
             date,
         }
@@ -56,8 +61,33 @@ impl Message {
         normalized.trim().to_string()
     }
 
-    fn extract_keywords(subject: &str) -> Vec<String> {
+    fn process_body(body: &str) -> String {
         use regex::Regex;
+        
+        // Remove quoted lines (lines starting with >)
+        let quote_re = Regex::new(r"(?m)^>.*$").unwrap();
+        let without_quotes = quote_re.replace_all(body, "");
+        
+        // Remove email headers that sometimes appear in body
+        let header_re = Regex::new(r"(?m)^[A-Za-z-]+:\s*.+$").unwrap();
+        let without_headers = header_re.replace_all(&without_quotes, "");
+        
+        // Remove excessive whitespace and normalize
+        let whitespace_re = Regex::new(r"\s+").unwrap();
+        let normalized = whitespace_re.replace_all(&without_headers, " ");
+        
+        // Remove common email signatures and footers
+        let sig_re = Regex::new(r"(?s)--\s*$.*").unwrap();
+        let without_sig = sig_re.replace_all(&normalized, "");
+        
+        without_sig.trim().to_string()
+    }
+
+    fn extract_keywords_from_content(subject: &str, body: &str) -> Vec<String> {
+        use regex::Regex;
+        
+        // Combine subject and body for keyword extraction
+        let combined_text = format!("{} {}", subject, body);
         
         // Extract meaningful words (3+ characters, not common words)
         let word_re = Regex::new(r"\b[a-zA-Z]{3,}\b").unwrap();
@@ -68,13 +98,35 @@ impl Message {
             "did", "man", "way", "what", "when", "where", "will", "with", "this",
             "that", "have", "from", "they", "know", "want", "been", "good", "much",
             "some", "time", "very", "when", "come", "here", "just", "like", "long",
-            "make", "many", "over", "such", "take", "than", "them", "well", "were"
+            "make", "many", "over", "such", "take", "than", "them", "well", "were",
+            // Add email-specific stop words
+            "wrote", "said", "email", "message", "sent", "reply", "forward", "original",
+            "mailto", "http", "https", "www", "com", "org", "net", "edu"
         ].iter().cloned().collect();
         
-        word_re.find_iter(subject)
-            .map(|m| m.as_str().to_lowercase())
-            .filter(|word| !stop_words.contains(word.as_str()) && word.len() >= 3)
+        let mut word_counts: HashMap<String, usize> = HashMap::new();
+        
+        // Count word frequencies
+        for word_match in word_re.find_iter(&combined_text) {
+            let word = word_match.as_str().to_lowercase();
+            if !stop_words.contains(word.as_str()) && word.len() >= 3 {
+                *word_counts.entry(word).or_insert(0) += 1;
+            }
+        }
+        
+        // Sort by frequency and return top keywords
+        let mut keywords: Vec<(String, usize)> = word_counts.into_iter().collect();
+        keywords.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        keywords.into_iter()
+            .take(10)  // Take top 10 keywords
+            .map(|(word, _)| word)
             .collect()
+    }
+
+    fn extract_keywords(subject: &str) -> Vec<String> {
+        // Keep this for backward compatibility, but it now just calls the new function
+        Self::extract_keywords_from_content(subject, "")
     }
 }
 
@@ -531,7 +583,7 @@ impl ThreadCollection {
         let analysis = self.analyze_topics();
         
         println!("\n=== Topic Analysis ===");
-        println!("Discovered {} topics from subject lines", analysis.topics.len());
+        println!("Discovered {} topics from subject lines and email bodies", analysis.topics.len());
         println!("\nTop 20 Topics by Frequency:");
         println!("{:<20} {:<10} {:<10} {:<15}", "Topic", "Messages", "Threads", "Participants");
         println!("{}", "=".repeat(60));
@@ -573,7 +625,68 @@ impl ThreadCollection {
                     let sample: Vec<String> = topic.participants.iter().take(10).cloned().collect();
                     println!("   Participants (sample): {}...", sample.join(", "));
                 }
+                
+                // Show sample content from this topic
+                self.show_sample_content_for_topic(&topic.name);
             }
         }
+    }
+
+    fn show_sample_content_for_topic(&self, topic_keyword: &str) {
+        let mut found_samples = 0;
+        let max_samples = 2;
+        
+        println!("   📧 Sample content:");
+        
+        'thread_loop: for thread in &self.threads {
+            if self.find_sample_in_thread(thread, topic_keyword, &mut found_samples, max_samples) {
+                if found_samples >= max_samples {
+                    break 'thread_loop;
+                }
+            }
+        }
+        
+        if found_samples == 0 {
+            println!("      (No sample content found)");
+        }
+    }
+
+    fn find_sample_in_thread(&self, thread: &MessageThread, topic_keyword: &str, 
+                           found_samples: &mut usize, max_samples: usize) -> bool {
+        if *found_samples >= max_samples {
+            return true;
+        }
+        
+        // Check if this message contains the topic keyword
+        if thread.message.topic_keywords.contains(&topic_keyword.to_string()) {
+            let subject = &thread.message.subject;
+            let body_preview = if thread.message.processed_body.len() > 100 {
+                format!("{}...", &thread.message.processed_body[..100])
+            } else {
+                thread.message.processed_body.clone()
+            };
+            
+            println!("      • Subject: \"{}\"", subject);
+            if !body_preview.trim().is_empty() {
+                println!("        Body: \"{}\"", body_preview.trim());
+            }
+            println!("        From: {}", thread.message.sender);
+            println!();
+            
+            *found_samples += 1;
+            
+            if *found_samples >= max_samples {
+                return true;
+            }
+        }
+        
+        // Search in children
+        for child in &thread.children {
+            if self.find_sample_in_thread(child, topic_keyword, found_samples, max_samples) {
+                return true;
+            }
+        }
+        
+        false
     }
 }

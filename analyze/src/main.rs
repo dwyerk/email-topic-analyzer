@@ -105,12 +105,25 @@ fn process_messages(mbox: mbox_reader::MboxFile, from: &Option<String>, mailing_
             .map(|refs| refs.iter().map(|s| s.to_string()).collect())
             .unwrap_or_else(Vec::new);
 
+        // Extract body content
+        let body = match message.body_text(0) {
+            Some(text) => text.to_string(),
+            None => {
+                // Try to get HTML body if text is not available
+                match message.body_html(0) {
+                    Some(html) => html.to_string(),
+                    None => String::new(),
+                }
+            }
+        };
+
         let msg = Message::new(
             message.message_id().unwrap_or("").to_string(),
             in_reply_to,
             references,
             sender_email.to_string(),
             subject.to_string(),
+            body,
             date,
         );
 
