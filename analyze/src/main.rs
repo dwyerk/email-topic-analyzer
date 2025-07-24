@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, fs, io::Write};
 use clap::Parser;
 use mbox_reader;
 use chrono::{NaiveDate, DateTime};
@@ -29,6 +29,8 @@ struct Args {
     start_date: Option<String>,
     #[clap(long, help = "End date for filtering emails (format: YYYY-MM-DD)")]
     end_date: Option<String>,
+    #[clap(long, help = "Output directory to save topic analysis results and constituent messages")]
+    output_dir: Option<String>,
 }
 
 fn main() {
@@ -51,7 +53,7 @@ fn main() {
     match parse_mbox(&args.path, &args.from, &args.mailing_list_address, &date_range) {
         Ok(thread_collection) => {
             if args.topic_modeling {
-                run_topic_modeling(&thread_collection, args.num_topics, !args.no_significance_filter);
+                run_topic_modeling(&thread_collection, args.num_topics, !args.no_significance_filter, &args.output_dir);
             } else if args.topic_analysis {
                 thread_collection.print_topic_analysis();
             } else if args.analysis_only {
@@ -369,7 +371,7 @@ fn build_thread_recursive(
     thread
 }
 
-fn run_topic_modeling(thread_collection: &ThreadCollection, num_topics: usize, use_significance_filter: bool) {
+fn run_topic_modeling(thread_collection: &ThreadCollection, num_topics: usize, use_significance_filter: bool, output_dir: &Option<String>) {
     println!("\n=== Unsupervised Topic Modeling (LDA) ===");
     println!("Analyzing {} threads and {} orphaned messages...", 
              thread_collection.threads.len(), 
@@ -457,6 +459,14 @@ fn run_topic_modeling(thread_collection: &ThreadCollection, num_topics: usize, u
                 topic.documents.len(),
                 (topic.documents.len() as f64 / model.documents.len() as f64) * 100.0);
     }
+    
+    // Save detailed analysis to output directory if specified
+    if let Some(output_path) = output_dir {
+        match save_topic_analysis(&model, thread_collection, output_path) {
+            Ok(()) => println!("\n✅ Topic analysis saved to: {}", output_path),
+            Err(e) => eprintln!("\n❌ Error saving analysis: {}", e),
+        }
+    }
 }
 
 fn collect_thread_texts(thread: &models::MessageThread, texts: &mut Vec<String>) {
@@ -468,4 +478,169 @@ fn collect_thread_texts(thread: &models::MessageThread, texts: &mut Vec<String>)
     for child in &thread.children {
         collect_thread_texts(child, texts);
     }
+}
+
+fn save_topic_analysis(model: &topic_modeling::TopicModel, thread_collection: &ThreadCollection, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Create output directory
+    fs::create_dir_all(output_dir)?;
+    
+    // Save topic summary
+    let summary_path = format!("{}/topic_summary.txt", output_dir);
+    let mut summary_file = fs::File::create(&summary_path)?;
+    
+    writeln!(summary_file, "=== EMAIL TOPIC ANALYSIS SUMMARY ===")?;
+    writeln!(summary_file, "Generated: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+    writeln!(summary_file, "Total documents: {}", model.documents.len())?;
+    writeln!(summary_file, "Number of topics: {}", model.topics.len())?;
+    writeln!(summary_file, "Vocabulary size: {}", model.vocabulary.len())?;
+    writeln!(summary_file)?;
+    
+    writeln!(summary_file, "=== TOPIC DISTRIBUTION ===")?;
+    for topic in &model.topics {
+        writeln!(summary_file, "📌 Topic {}: \"{}\"", topic.id + 1, topic.name)?;
+        writeln!(summary_file, "   Documents: {} ({:.1}%)", 
+                topic.documents.len(), 
+                (topic.documents.len() as f64 / model.documents.len() as f64) * 100.0)?;
+        writeln!(summary_file, "   Coherence: {:.3}", topic.coherence_score)?;
+        writeln!(summary_file, "   Top words: {}", 
+                topic.words.iter().take(8).map(|(w, p)| format!("{}({:.3})", w, p)).collect::<Vec<_>>().join(", "))?;
+        writeln!(summary_file)?;
+    }
+    
+    // Create message mapping for quick lookup
+    let mut all_messages = Vec::new();
+    
+    // Collect all messages from threads
+    for thread in &thread_collection.threads {
+        collect_all_thread_messages(thread, &mut all_messages);
+    }
+    
+    // Add orphaned messages
+    for message in &thread_collection.orphaned_messages {
+        all_messages.push(message);
+    }
+    
+    // Create directories and save constituent messages for each topic
+    for topic in &model.topics {
+        let topic_dir = format!("{}/topic_{:02}_{}", output_dir, topic.id + 1, 
+                               sanitize_filename(&topic.name));
+        fs::create_dir_all(&topic_dir)?;
+        
+        // Save topic details
+        let topic_info_path = format!("{}/topic_info.txt", topic_dir);
+        let mut topic_info_file = fs::File::create(&topic_info_path)?;
+        
+        writeln!(topic_info_file, "=== TOPIC {} DETAILS ===", topic.id + 1)?;
+        writeln!(topic_info_file, "Name: {}", topic.name)?;
+        writeln!(topic_info_file, "Documents: {} ({:.1}%)", 
+                topic.documents.len(), 
+                (topic.documents.len() as f64 / model.documents.len() as f64) * 100.0)?;
+        writeln!(topic_info_file, "Coherence: {:.3}", topic.coherence_score)?;
+        writeln!(topic_info_file)?;
+        writeln!(topic_info_file, "Top words:")?;
+        for (word, prob) in &topic.words {
+            writeln!(topic_info_file, "  {:<15} {:.4}", word, prob)?;
+        }
+        writeln!(topic_info_file)?;
+        
+        // Save constituent messages
+        writeln!(topic_info_file, "=== CONSTITUENT MESSAGES ===")?;
+        for (msg_index, &doc_id) in topic.documents.iter().enumerate() {
+            if let Some(document) = model.documents.get(doc_id) {
+                // Try to find the corresponding original message
+                let message_file = format!("{}/message_{:03}.txt", topic_dir, msg_index + 1);
+                let mut msg_file = fs::File::create(&message_file)?;
+                
+                // Find the original message that corresponds to this document
+                if let Some(original_message) = find_original_message(&document.text, &all_messages) {
+                    writeln!(msg_file, "=== MESSAGE {} ===", msg_index + 1)?;
+                    writeln!(msg_file, "From: {}", original_message.sender)?;
+                    writeln!(msg_file, "Date: {}", original_message.date)?;
+                    writeln!(msg_file, "Subject: {}", original_message.subject)?;
+                    writeln!(msg_file, "Message ID: {}", original_message.id)?;
+                    writeln!(msg_file)?;
+                    writeln!(msg_file, "--- Content ---")?;
+                    writeln!(msg_file, "{}", original_message.processed_body)?;
+                    writeln!(msg_file)?;
+                    writeln!(msg_file, "--- Topic Analysis ---")?;
+                    writeln!(msg_file, "Primary Topic: {} ({})", document.primary_topic + 1, 
+                            model.topics.get(document.primary_topic).map(|t| t.name.as_str()).unwrap_or("Unknown"))?;
+                    writeln!(msg_file, "Topic Distribution:")?;
+                    for (topic_id, prob) in document.topic_distribution.iter().enumerate() {
+                        if *prob > 0.1 {  // Only show topics with >10% probability
+                            let topic_name = model.topics.get(topic_id).map(|t| t.name.as_str()).unwrap_or("Unknown");
+                            writeln!(msg_file, "  Topic {} ({}): {:.1}%", topic_id + 1, topic_name, prob * 100.0)?;
+                        }
+                    }
+                    
+                    // Also log to topic info
+                    writeln!(topic_info_file, "Message {}: From {} - \"{}\"", 
+                            msg_index + 1, original_message.sender, 
+                            &original_message.subject[..std::cmp::min(50, original_message.subject.len())])?;
+                } else {
+                    // Fallback - just save the processed document text
+                    writeln!(msg_file, "=== PROCESSED DOCUMENT {} ===", msg_index + 1)?;
+                    writeln!(msg_file, "Text: {}", document.text)?;
+                    writeln!(msg_file, "Primary Topic: {}", document.primary_topic + 1)?;
+                    
+                    writeln!(topic_info_file, "Document {}: [Processed text - {} chars]", 
+                            msg_index + 1, document.text.len())?;
+                }
+            }
+        }
+    }
+    
+    println!("\n📁 Created topic directories:");
+    for topic in &model.topics {
+        let topic_dir_name = format!("topic_{:02}_{}", topic.id + 1, sanitize_filename(&topic.name));
+        println!("   📂 {:<25} ({} messages)", topic_dir_name, topic.documents.len());
+    }
+    
+    Ok(())
+}
+
+fn collect_all_thread_messages<'a>(thread: &'a models::MessageThread, messages: &mut Vec<&'a models::Message>) {
+    messages.push(&thread.message);
+    for child in &thread.children {
+        collect_all_thread_messages(child, messages);
+    }
+}
+
+fn find_original_message<'a>(document_text: &str, all_messages: &[&'a models::Message]) -> Option<&'a models::Message> {
+    // Try to match the document text with original messages
+    // Since document text is "subject + processed_body", we look for the best match
+    
+    for message in all_messages {
+        let combined_text = format!("{} {}", message.subject, message.processed_body);
+        
+        // Simple heuristic: if the document text contains significant portions of the message
+        if document_text.len() > 20 && combined_text.len() > 20 {
+            let words_doc: HashSet<&str> = document_text.split_whitespace().collect();
+            let words_msg: HashSet<&str> = combined_text.split_whitespace().collect();
+            
+            let intersection_size = words_doc.intersection(&words_msg).count();
+            let union_size = words_doc.union(&words_msg).count();
+            
+            if union_size > 0 {
+                let jaccard_similarity = intersection_size as f64 / union_size as f64;
+                if jaccard_similarity > 0.5 {  // More than 50% similarity
+                    return Some(message);
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => c,
+            _ => '_',
+        })
+        .collect::<String>()
+        .chars()
+        .take(20)  // Limit length
+        .collect()
 }

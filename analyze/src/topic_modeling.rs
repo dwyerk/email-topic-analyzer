@@ -487,46 +487,176 @@ impl SimpleLDA {
             return format!("Topic");
         }
         
-        // If we have significance stats, use them to enhance topic naming
+        // Semantic categorization approach - identify content themes beyond location
+        let semantic_words = self.extract_semantic_content_words(word_probs, word_stats);
+        
+        if !semantic_words.is_empty() {
+            return semantic_words.join("-");
+        }
+        
+        // Fallback to enhanced significance-based approach if no semantic content found
         if !word_stats.is_empty() && self.config.use_significance_filtering {
-            // Create combined scores: LDA probability * significance score
-            let mut enhanced_words: Vec<(String, f64, f64, f64)> = word_probs.iter()
-                .filter_map(|(word, lda_prob)| {
-                    if let Some(stats) = word_stats.get(word) {
-                        let combined_score = lda_prob * stats.significance_score.sqrt(); // Square root to moderate the effect
-                        Some((word.clone(), *lda_prob, stats.significance_score, combined_score))
+            let content_words = self.extract_content_focused_words(word_probs, word_stats);
+            if !content_words.is_empty() {
+                return content_words.join("-");
+            }
+        }
+        
+        // Final fallback
+        let top_words: Vec<String> = word_probs.iter().take(3).map(|(word, _)| word.clone()).collect();
+        top_words.join("-")
+    }
+    
+    fn extract_semantic_content_words(&self, word_probs: &[(String, f64)], word_stats: &HashMap<String, WordStatistics>) -> Vec<String> {
+        // Enhanced semantic categorization with focus on conversational themes
+        let infrastructure = ["road", "street", "traffic", "construction", "repair", "sidewalk", "crosswalk", "pothole", "lighting", "sign", "stop", "parking", "snow", "plow"];
+        let services = ["police", "fire", "ambulance", "garbage", "recycling", "water", "electric", "gas", "internet", "phone", "postal", "delivery", "packages"];
+        let community = ["school", "library", "center", "playground", "pool", "gym", "senior", "youth", "children", "kids", "family", "neighbor", "meeting"];
+        let events = ["festival", "concert", "market", "sale", "fundraising", "volunteer", "donation", "celebration", "parade", "screening", "film"];
+        let business = ["restaurant", "store", "shop", "business", "contractor", "plumber", "electrician", "landscaping", "cleaning", "exterminator"];
+        let issues = ["crime", "safety", "noise", "complaint", "problem", "concern", "emergency", "accident", "incident", "alert", "missing"];
+        let nature = ["tree", "garden", "grass", "flowers", "birds", "wildlife", "environment", "composting", "sustainability", "rabbits"];
+        let housing = ["house", "apartment", "rent", "sale", "property", "realtor", "moving", "homeowner", "tenant", "curb"];
+        let activities = ["found", "lost", "missing", "looking", "seeking", "offering", "selling", "buying", "need", "help", "wanted"];
+        
+        let categories = [
+            ("infrastructure", &infrastructure[..]),
+            ("services", &services[..]),
+            ("community", &community[..]),
+            ("events", &events[..]),
+            ("business", &business[..]),
+            ("issues", &issues[..]),
+            ("nature", &nature[..]),
+            ("housing", &housing[..]),
+            ("activities", &activities[..]),
+        ];
+        
+        // Score words by semantic category relevance and conversation importance
+        let mut category_scores: HashMap<&str, f64> = HashMap::new();
+        let mut word_categories: HashMap<String, &str> = HashMap::new();
+        let mut conversation_themes: Vec<(String, f64, &str)> = Vec::new();
+        
+        for (word, lda_prob) in word_probs.iter().take(20) {  // Consider top 20 words
+            for (category_name, category_words) in &categories {
+                if category_words.contains(&word.as_str()) {
+                    let base_score = if let Some(stats) = word_stats.get(word) {
+                        // Boost words that are conversationally significant but not overwhelming
+                        let sig_factor = (stats.significance_score / 150.0).min(1.5);
+                        lda_prob * sig_factor
                     } else {
-                        // Fallback for words without stats
-                        Some((word.clone(), *lda_prob, 0.0, *lda_prob))
-                    }
-                })
-                .collect();
-            
-            // Sort by combined score (LDA probability weighted by significance)
-            enhanced_words.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
-            
-            // Take top 3 words based on significance-weighted scores
-            let top_words: Vec<String> = enhanced_words.iter()
-                .take(3)
-                .map(|(word, _, _, _)| word.clone())
-                .collect();
-            
-            // Debug output to show the selection process
-            if enhanced_words.len() >= 3 {
-                println!("🏷️  Topic naming (significance-aware):");
-                for (i, (word, lda_prob, sig_score, combined)) in enhanced_words.iter().take(5).enumerate() {
-                    let marker = if i < 3 { "✓" } else { " " };
-                    println!("   {} {:<12} LDA: {:.3}, Sig: {:.3}, Combined: {:.3}", 
-                            marker, word, lda_prob, sig_score, combined);
+                        *lda_prob
+                    };
+                    
+                    // Boost certain categories that represent actual conversation topics
+                    let category_boost = match *category_name {
+                        "activities" => 1.5,    // Things people are doing/looking for
+                        "issues" => 1.3,        // Problems/concerns  
+                        "events" => 1.3,        // Community happenings
+                        "nature" => 1.2,        // Environmental discussions
+                        "business" => 1.1,      // Service recommendations
+                        _ => 1.0
+                    };
+                    
+                    let final_score = base_score * category_boost;
+                    *category_scores.entry(category_name).or_insert(0.0) += final_score;
+                    word_categories.insert(word.clone(), category_name);
+                    conversation_themes.push((word.clone(), final_score, category_name));
                 }
             }
-            
-            top_words.join("-")
-        } else {
-            // Fallback to original simple method
-            let top_words: Vec<String> = word_probs.iter().take(3).map(|(word, _)| word.clone()).collect();
-            top_words.join("-")
         }
+        
+        // Sort conversation themes by their conversational importance
+        conversation_themes.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        // Find the dominant categories
+        let mut sorted_categories: Vec<(&str, f64)> = category_scores.iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
+        sorted_categories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        // Extract the most conversationally relevant words (not just category representatives)
+        let mut result_words = Vec::new();
+        
+        // Take top conversation themes, ensuring diversity across categories
+        let mut used_categories = std::collections::HashSet::new();
+        for (word, _score, category) in &conversation_themes {
+            if result_words.len() >= 3 { break; }
+            
+            // Skip if we already have 2 words from this category
+            let category_count = result_words.iter()
+                .filter(|w| word_categories.get(*w) == Some(category))
+                .count();
+            if category_count >= 2 { continue; }
+            
+            result_words.push(word.clone());
+            used_categories.insert(*category);
+        }
+        
+        // If we found good semantic content, show detailed analysis
+        if !result_words.is_empty() {
+            println!("🎯 Semantic conversation analysis:");
+            for (category_name, score) in sorted_categories.iter().take(4) {
+                println!("   {} category: {:.3} relevance", category_name, score);
+            }
+            println!("   Top conversation themes:");
+            for (word, score, category) in conversation_themes.iter().take(6) {
+                let marker = if result_words.contains(word) { "✓" } else { " " };
+                println!("   {} {:<12} {:<12} score: {:.3}", 
+                        marker, word, category, score);
+            }
+            println!("   Selected topic words: {}", result_words.join(", "));
+        }
+        
+        result_words
+    }
+    
+    fn extract_content_focused_words(&self, word_probs: &[(String, f64)], word_stats: &HashMap<String, WordStatistics>) -> Vec<String> {
+        // Filter out location/infrastructure words that dominate but don't define topics
+        let location_words = ["takoma", "park", "city", "maryland", "dc", "washington", "avenue", "street", "road"];
+        let infrastructure_generic = ["mailing", "via", "cedar", "willow", "birch", "maple", "oak"];
+        let communication = ["email", "message", "phone", "call", "contact", "address"];
+        let temporal = ["today", "tomorrow", "yesterday", "week", "month", "year", "date", "time"];
+        
+        let filtered_words: Vec<(String, f64, f64)> = word_probs.iter()
+            .filter_map(|(word, lda_prob)| {
+                // Skip if it's a common location/infrastructure word
+                if location_words.contains(&word.as_str()) || 
+                   infrastructure_generic.contains(&word.as_str()) ||
+                   communication.contains(&word.as_str()) ||
+                   temporal.contains(&word.as_str()) {
+                    return None;
+                }
+                
+                if let Some(stats) = word_stats.get(word) {
+                    // Prioritize words with high LDA probability but moderate significance
+                    // (Very high significance often means location words)
+                    let balanced_score = lda_prob * (1.0 + (stats.significance_score / 200.0).min(0.5));
+                    Some((word.clone(), *lda_prob, balanced_score))
+                } else {
+                    Some((word.clone(), *lda_prob, *lda_prob))
+                }
+            })
+            .collect();
+            
+        // Sort by balanced score and take top words
+        let mut sorted_words = filtered_words;
+        sorted_words.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+        
+        let result_words: Vec<String> = sorted_words.iter()
+            .take(3)
+            .map(|(word, _, _)| word.clone())
+            .collect();
+            
+        if !result_words.is_empty() {
+            println!("🔍 Content-focused naming (filtered):");
+            for (word, lda_prob, balanced_score) in sorted_words.iter().take(5) {
+                let marker = if result_words.contains(word) { "✓" } else { " " };
+                println!("   {} {:<12} LDA: {:.3}, Balanced: {:.3}", 
+                        marker, word, lda_prob, balanced_score);
+            }
+        }
+        
+        result_words
     }
 
     fn calculate_coherence(&self, word_probs: &[(String, f64)]) -> f64 {
