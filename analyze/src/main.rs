@@ -507,10 +507,10 @@ fn save_topic_analysis(model: &topic_modeling::TopicModel, thread_collection: &T
         writeln!(summary_file)?;
     }
     
-    // Create message mapping for quick lookup
+    // Create ordered list of all messages (maintaining order as they were processed)
     let mut all_messages = Vec::new();
     
-    // Collect all messages from threads
+    // Collect all messages from threads in order
     for thread in &thread_collection.threads {
         collect_all_thread_messages(thread, &mut all_messages);
     }
@@ -519,6 +519,8 @@ fn save_topic_analysis(model: &topic_modeling::TopicModel, thread_collection: &T
     for message in &thread_collection.orphaned_messages {
         all_messages.push(message);
     }
+    
+    println!("📊 Message mapping: {} documents, {} original messages", model.documents.len(), all_messages.len());
     
     // Create directories and save constituent messages for each topic
     for topic in &model.topics {
@@ -551,17 +553,23 @@ fn save_topic_analysis(model: &topic_modeling::TopicModel, thread_collection: &T
                 let message_file = format!("{}/message_{:03}.txt", topic_dir, msg_index + 1);
                 let mut msg_file = fs::File::create(&message_file)?;
                 
-                // Find the original message that corresponds to this document
-                if let Some(original_message) = find_original_message(&document.text, &all_messages) {
+                // Use document index to get original message (documents processed in same order as messages)
+                if doc_id < all_messages.len() {
+                    let original_message = all_messages[doc_id];
                     writeln!(msg_file, "=== MESSAGE {} ===", msg_index + 1)?;
                     writeln!(msg_file, "From: {}", original_message.sender)?;
                     writeln!(msg_file, "Date: {}", original_message.date)?;
                     writeln!(msg_file, "Subject: {}", original_message.subject)?;
                     writeln!(msg_file, "Message ID: {}", original_message.id)?;
                     writeln!(msg_file)?;
-                    writeln!(msg_file, "--- Content ---")?;
+                    writeln!(msg_file, "--- Original Content ---")?;
                     writeln!(msg_file, "{}", original_message.processed_body)?;
                     writeln!(msg_file)?;
+                    if !original_message.subject.is_empty() {
+                        writeln!(msg_file, "--- Subject Analysis ---")?;
+                        writeln!(msg_file, "Subject: {}", original_message.subject)?;
+                        writeln!(msg_file)?;
+                    }
                     writeln!(msg_file, "--- Topic Analysis ---")?;
                     writeln!(msg_file, "Primary Topic: {} ({})", document.primary_topic + 1, 
                             model.topics.get(document.primary_topic).map(|t| t.name.as_str()).unwrap_or("Unknown"))?;
@@ -574,16 +582,26 @@ fn save_topic_analysis(model: &topic_modeling::TopicModel, thread_collection: &T
                     }
                     
                     // Also log to topic info
-                    writeln!(topic_info_file, "Message {}: From {} - \"{}\"", 
-                            msg_index + 1, original_message.sender, 
-                            &original_message.subject[..std::cmp::min(50, original_message.subject.len())])?;
+                    writeln!(topic_info_file, "Message {}: From {} on {} - \"{}\"", 
+                            msg_index + 1, original_message.sender, original_message.date,
+                            &original_message.subject[..std::cmp::min(60, original_message.subject.len())])?;
                 } else {
-                    // Fallback - just save the processed document text
-                    writeln!(msg_file, "=== PROCESSED DOCUMENT {} ===", msg_index + 1)?;
-                    writeln!(msg_file, "Text: {}", document.text)?;
-                    writeln!(msg_file, "Primary Topic: {}", document.primary_topic + 1)?;
+                    // Enhanced fallback - show what we can reconstruct
+                    writeln!(msg_file, "=== DOCUMENT {} (Reconstructed) ===", msg_index + 1)?;
+                    writeln!(msg_file, "Processed Text: {}", document.text)?;
+                    writeln!(msg_file)?;
+                    writeln!(msg_file, "--- Topic Analysis ---")?;
+                    writeln!(msg_file, "Primary Topic: {} ({})", document.primary_topic + 1,
+                            model.topics.get(document.primary_topic).map(|t| t.name.as_str()).unwrap_or("Unknown"))?;
+                    writeln!(msg_file, "Topic Distribution:")?;
+                    for (topic_id, prob) in document.topic_distribution.iter().enumerate() {
+                        if *prob > 0.1 {
+                            let topic_name = model.topics.get(topic_id).map(|t| t.name.as_str()).unwrap_or("Unknown");
+                            writeln!(msg_file, "  Topic {} ({}): {:.1}%", topic_id + 1, topic_name, prob * 100.0)?;
+                        }
+                    }
                     
-                    writeln!(topic_info_file, "Document {}: [Processed text - {} chars]", 
+                    writeln!(topic_info_file, "Document {}: [Processed text - {} chars - matching failed]", 
                             msg_index + 1, document.text.len())?;
                 }
             }
@@ -604,33 +622,6 @@ fn collect_all_thread_messages<'a>(thread: &'a models::MessageThread, messages: 
     for child in &thread.children {
         collect_all_thread_messages(child, messages);
     }
-}
-
-fn find_original_message<'a>(document_text: &str, all_messages: &[&'a models::Message]) -> Option<&'a models::Message> {
-    // Try to match the document text with original messages
-    // Since document text is "subject + processed_body", we look for the best match
-    
-    for message in all_messages {
-        let combined_text = format!("{} {}", message.subject, message.processed_body);
-        
-        // Simple heuristic: if the document text contains significant portions of the message
-        if document_text.len() > 20 && combined_text.len() > 20 {
-            let words_doc: HashSet<&str> = document_text.split_whitespace().collect();
-            let words_msg: HashSet<&str> = combined_text.split_whitespace().collect();
-            
-            let intersection_size = words_doc.intersection(&words_msg).count();
-            let union_size = words_doc.union(&words_msg).count();
-            
-            if union_size > 0 {
-                let jaccard_similarity = intersection_size as f64 / union_size as f64;
-                if jaccard_similarity > 0.5 {  // More than 50% similarity
-                    return Some(message);
-                }
-            }
-        }
-    }
-    
-    None
 }
 
 fn sanitize_filename(name: &str) -> String {
